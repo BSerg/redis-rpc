@@ -20,6 +20,16 @@ export default class RPCClient {
         this.pub = this.sub.duplicate();
     }
 
+    listen(channel, callback = () => {}) {
+        this.callbacks[channel] = callback;
+        this.sub.subscribe(channel);
+    }
+
+    removeListener(channel) {
+        delete this.callbacks[channel];
+        this.sub.unsubscribe(channel);
+    }
+
     call(channel, msg, _id) {
         return new Promise((resolve, reject) => {
             _id = _id || uuid.v4();
