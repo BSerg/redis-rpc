@@ -1,5 +1,5 @@
-import redis from 'redis';
 import uuid from 'uuid';
+import _redis from 'redis';
 
 let defaultOpts = {
     scope: 'rpc',
@@ -14,11 +14,9 @@ export default class RPCClient {
         let _opts = {...defaultOpts, opts};
         this._id = uuid.v4();
         this.scope = _opts.scope;
-        this.redis = redis.createClient(_opts.redis);
+        this.r = _redis.createClient(_opts.redis);
         this.callbacks = {};
         this.cancels = {};
-
-        this.init();
     }
 
     _getQueue(queue) {
@@ -28,34 +26,37 @@ export default class RPCClient {
     on(queue, callback = (method, params) => {}) {
         this.cancels[queue] = null;
         let processQueue = this._getQueue(queue) + ':proc:' + this._id;
-        this.redis.brpoplpush(this._getQueue(queue), processQueue, (err, req) => {
-
-            let respond = res => {
-                let response = {
-                    jsonrpc: '2.0',
-                    id: req.id,
-                    ...res
-                };
-                this.redis.lpush(this._getQueue(req.id), JSON.stringify(response));
-                this.redis.rpop(processQueue);
-                this.cancels[queue] = setTimeout(() => {
-                    this.processQueue(queue, callback);
-                }, 0);
-            }
-
-            callback(req.method, req.params).then(result => {
-                respond({result});
-            }).catch(error => {
-                respond({error});
+        let _process = (queue, callback) => {
+            this.r.brpoplpush(this._getQueue(queue), processQueue, 0, (err, req) => {
+                let request = JSON.parse(req);
+                let respond = result => {
+                    let response = {
+                        jsonrpc: '2.0',
+                        id: request.id,
+                        ...result
+                    };
+                    this.r.lpush(this._getQueue(request.id), JSON.stringify(response));
+                    this.r.rpop(processQueue);
+                    this.cancels[queue] = setTimeout(() => {
+                        _process(queue, callback);
+                    }, 0);
+                }
+    
+                callback(request.method, request.params).then(result => {
+                    respond({result});
+                }).catch(error => {
+                    respond({error});
+                });
             });
-        });
+        };
+        _process(queue, callback);
     }
 
     stop(queue) {
         clearTimeout(this.cancels[queue]);
     }
 
-    call(queue, method, params) {
+    call(queue, method, params, timeout = 300) {
         return new Promise((resolve, reject) => {
             let request = {
                 jsonrpc: '2.0',
@@ -63,17 +64,23 @@ export default class RPCClient {
                 method: method,
                 params: params
             }
-            this.redis.lpush(this._getQueue(queue), JSON.stringify(request));
-            this.redis.brpop(this._getQueue(request.id), 600, (err, res) => {
+            this.r.lpush(this._getQueue(queue), JSON.stringify(request));
+            this.r.brpop(this._getQueue(request.id), timeout, (err, res) => {
                 if (err) {
                     reject(err);
                 } else {
-                    let resData = JSON.parse(res);
-                    if (resData.error) {
-                        reject(err);
+                    if (res == null) {
+                        reject('Timeout');
                     } else {
-                        resolve(resData.result);
+                        let [_queue, _resData] = res;
+                        let resData = JSON.parse(_resData);
+                        if (resData.error) {
+                            reject(err);
+                        } else {
+                            resolve(resData.result);
+                        }
                     }
+                    
                 }
             });
         });
